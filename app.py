@@ -9,18 +9,20 @@ import yt_dlp
 # --- 페이지 설정 ---
 st.set_page_config(page_title="💰 100억 투자 비서", page_icon="📈", layout="wide")
 
+# ★ 핵심 해결 부분: DB 이름을 stock_v2.db 로 변경하여 기존 충돌을 무시합니다 ★
+DB_NAME = 'stock_v2.db' 
+
 # --- DB 초기화 ---
 def init_db():
-    conn = sqlite3.connect('stock_mobile_insights.db')
+    conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # 전문가 테이블 (channel_url 삭제, 이름만 저장)
+    # 전문가 테이블
     c.execute('''CREATE TABLE IF NOT EXISTS experts (id INTEGER PRIMARY KEY, name TEXT UNIQUE)''')
     # 분석 결과 테이블
     c.execute('''CREATE TABLE IF NOT EXISTS analysis 
                  (id INTEGER PRIMARY KEY, date TEXT, expert_name TEXT, video_title TEXT, video_url TEXT,
                   market_view TEXT, macro_view TEXT, buy_recom TEXT, sell_recom TEXT)''')
     
-    # 기본 전문가 데이터가 없으면 예시로 하나 넣기
     c.execute("SELECT COUNT(*) FROM experts")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO experts (name) VALUES ('김영익')")
@@ -32,25 +34,19 @@ init_db()
 
 # --- 유튜브 전체 최신 검색 로직 (yt-dlp) ---
 def search_recent_videos(expert_name, max_results=30):
-    """유튜브 전체에서 '전문가이름 주식'으로 검색하여 최신순으로 가져옵니다."""
-    # ytsearchdateN: 최신순으로 N개 검색
     search_query = f"ytsearchdate{max_results}:\"{expert_name} 주식\""
-    ydl_opts = {
-        'extract_flat': True,
-        'quiet': True,
-        'ignoreerrors': True # 오류 나는 영상은 무시하고 계속 진행
-    }
+    ydl_opts = {'extract_flat': True, 'quiet': True, 'ignoreerrors': True}
     videos = []
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(search_query, download=False)
             if 'entries' in info:
                 for entry in info['entries']:
-                    if entry: # None 체크
+                    if entry: 
                         videos.append({
                             'title': entry.get('title'),
                             'url': entry.get('url'),
-                            'date': entry.get('upload_date') # YYYYMMDD 형태
+                            'date': entry.get('upload_date')
                         })
     except Exception as e:
         st.error(f"영상 검색 중 오류 발생: {e}")
@@ -59,15 +55,11 @@ def search_recent_videos(expert_name, max_results=30):
 # --- AI 분석 로직 ---
 def analyze_video_with_gemini(video_url, expert_name, api_key):
     try:
-        # 1. 유튜브 자막 추출
         video_id = video_url.split("v=")[-1].split("&")[0]
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko'])
         transcript_text = " ".join([t['text'] for t in transcript_list])
-        
-        # 자막 길이 조절 (Gemini 토큰 제한 및 속도 고려)
         transcript_text = transcript_text[:15000]
 
-        # 2. 구글 Gemini API 호출
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash') 
         
@@ -88,7 +80,6 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
         response = model.generate_content(prompt)
         text = response.text
         
-        # 텍스트 파싱
         def extract_section(keyword):
             if f"[{keyword}]" in text:
                 return text.split(f"[{keyword}]")[1].split("[")[0].strip()
@@ -101,7 +92,6 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
             "sell_recom": extract_section("매도 추천")
         }
     except Exception:
-        # 자막이 없는 영상이거나 처리 오류 시 None 반환
         return None
 
 # --- 사이드바: 설정 및 전문가 목록 ---
@@ -112,8 +102,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("👥 관심 전문가")
     
-    # DB에서 전문가 목록 가져오기
-    conn = sqlite3.connect('stock_mobile_insights.db')
+    conn = sqlite3.connect(DB_NAME)
     experts_df = pd.read_sql_query("SELECT * FROM experts", conn)
     expert_names = experts_df['name'].tolist()
     
@@ -139,12 +128,11 @@ if selected_expert:
     st.title(f"📈 '{selected_expert}' 인사이트 타임라인")
     st.caption(f"어느 채널에 출연하셨든 {selected_expert}님의 가장 최근 인터뷰를 찾아 요약합니다.")
     
-    conn = sqlite3.connect('stock_mobile_insights.db')
+    conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
     col1, col2 = st.columns([1, 1])
     with col1:
-        # 최초 세팅용 대량 스캔
         if st.button("🔄 최근 출연 영상 30개 싹 모아서 분석 (초기 세팅용)", use_container_width=True):
             if not google_api_key:
                 st.error("좌측 상단에 Google API Key를 입력해야 실행됩니다.")
@@ -155,7 +143,6 @@ if selected_expert:
                     
                     success_count = 0
                     for i, video in enumerate(videos):
-                        # DB에 중복 저장 방지
                         c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                         if c.fetchone() is None:
                             result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
@@ -171,13 +158,12 @@ if selected_expert:
                     st.success(f"✅ 분석 완료! 총 {success_count}개의 새로운 인사이트가 저장되었습니다.")
 
     with col2:
-        # 매일 누르는 업데이트 버튼
         if st.button("▶️ 오늘 새로 출연하신 영상 찾기 (매일 업데이트용)", type="primary", use_container_width=True):
             if not google_api_key:
                 st.error("좌측 상단에 Google API Key를 입력해야 실행됩니다.")
             else:
                 with st.spinner('새로운 인터뷰 영상이 있는지 확인 중입니다...'):
-                    videos = search_recent_videos(selected_expert, max_results=5) # 최근 5개만 가볍게 스캔
+                    videos = search_recent_videos(selected_expert, max_results=5) 
                     new_found = False
                     for video in videos:
                         c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
@@ -198,7 +184,6 @@ if selected_expert:
 
     st.markdown("---")
     
-    # --- 해당 전문가의 분석 데이터 리스트업 ---
     df = pd.read_sql_query("SELECT * FROM analysis WHERE expert_name=? ORDER BY date DESC", conn, params=(selected_expert,))
     conn.close()
 
