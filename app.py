@@ -29,12 +29,10 @@ def init_db():
 
 init_db()
 
-# --- ★ 새로운 스텔스 유튜브 검색 로직 ★ ---
+# --- 유튜브 검색 로직 ---
 def search_recent_videos(expert_name, max_results=30):
-    """유튜브 봇 차단을 우회하는 가벼운 검색 엔진을 사용하여 최신순으로 가져옵니다."""
     videos = []
     try:
-        # 전문가 이름 + 주식 키워드로 '최신 업로드 순' 검색
         customSearch = CustomSearch(f"{expert_name} 주식", VideoSortOrder.uploadDate, limit=max_results)
         results = customSearch.result().get('result', [])
         
@@ -48,14 +46,32 @@ def search_recent_videos(expert_name, max_results=30):
         st.error(f"영상 검색 중 오류 발생: {e}")
     return videos
 
-# --- AI 분석 로직 ---
+# --- AI 분석 로직 (에러 상세 반환으로 업그레이드) ---
 def analyze_video_with_gemini(video_url, expert_name, api_key):
     try:
-        video_id = video_url.split("v=")[-1].split("&")[0]
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko'])
-        transcript_text = " ".join([t['text'] for t in transcript_list])
-        transcript_text = transcript_text[:15000]
+        # 1. 안전한 Video ID 추출 (Shorts, youtu.be 등 다양한 포맷 완벽 대응)
+        video_id = ""
+        if "v=" in video_url:
+            video_id = video_url.split("v=")[-1].split("&")[0]
+        elif "youtu.be/" in video_url:
+            video_id = video_url.split("youtu.be/")[-1].split("?")[0]
+        elif "shorts/" in video_url:
+            video_id = video_url.split("shorts/")[-1].split("?")[0]
+        else:
+            return "지원하지 않는 유튜브 링크 형식입니다."
 
+        # 2. 자막 추출 (더 강력한 로직)
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript = transcript_list.find_transcript(['ko']) # 한국어 자막 찾기
+            transcript_data = transcript.fetch()
+            transcript_text = " ".join([t['text'] for t in transcript_data])
+        except Exception:
+            return "영상에 한국어 자막(CC)이 없거나 라이브 스트리밍 영상입니다."
+            
+        transcript_text = transcript_text[:15000] # 토큰 제한 방지
+
+        # 3. 구글 Gemini API 호출
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash') 
         
@@ -87,10 +103,10 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
             "buy_recom": extract_section("매수 추천"),
             "sell_recom": extract_section("매도 추천")
         }
-    except Exception:
-        return None
+    except Exception as e:
+        return f"AI 분석 실패 (API 키를 확인해주세요): {str(e)}"
 
-# --- 사이드바: 설정 및 전문가 목록 ---
+# --- UI 및 메인 로직 ---
 with st.sidebar:
     st.header("⚙️ 시스템 설정")
     google_api_key = st.text_input("Google API Key 입력", type="password")
@@ -119,33 +135,38 @@ with st.sidebar:
                 st.error("이미 등록된 전문가입니다.")
     conn.close()
 
-# --- 메인 화면 ---
 if selected_expert:
     st.title(f"📈 '{selected_expert}' 인사이트 타임라인")
-    st.caption(f"어느 채널에 출연하셨든 {selected_expert}님의 가장 최근 인터뷰를 찾아 요약합니다.")
     
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("🔄 최근 출연 영상 30개 싹 모아서 분석 (초기 세팅용)", use_container_width=True):
+        if st.button("🔄 최근 출연 영상 30개 분석 (초기 세팅용)", use_container_width=True):
             if not google_api_key:
                 st.error("좌측 상단에 Google API Key를 입력해야 실행됩니다.")
             else:
-                with st.spinner(f'유튜브 전체에서 {selected_expert}님의 최근 영상을 찾아 분석 중입니다...'):
+                with st.spinner(f'{selected_expert}님의 최근 영상을 수집 중입니다...'):
                     videos = search_recent_videos(selected_expert, max_results=30)
                     
                     if not videos:
-                        st.warning("영상을 찾지 못했습니다. 잠시 후 다시 시도해주세요.")
+                        st.warning("영상을 찾지 못했습니다.")
                     else:
+                        st.info(f"총 {len(videos)}개의 영상을 찾았습니다. 분석을 시작합니다.")
                         progress_bar = st.progress(0)
                         success_count = 0
+                        
                         for i, video in enumerate(videos):
+                            # 이미 분석된 영상인지 확인
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
-                            if c.fetchone() is None:
+                            if c.fetchone() is not None:
+                                st.toast(f"⏩ 이미 저장된 영상 패스: {video['title'][:20]}...")
+                            else:
                                 result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
-                                if result:
+                                
+                                # 결과가 딕셔너리면 성공, 문자열이면 실패 사유
+                                if isinstance(result, dict):
                                     formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
                                     c.execute('''INSERT INTO analysis (date, expert_name, video_title, video_url, market_view, macro_view, buy_recom, sell_recom)
                                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
@@ -153,15 +174,21 @@ if selected_expert:
                                                result["market_view"], result["macro_view"], result["buy_recom"], result["sell_recom"]))
                                     conn.commit()
                                     success_count += 1
+                                    st.toast(f"✅ 분석 완료: {video['title'][:20]}...")
+                                else:
+                                    # 왜 실패했는지 화면 우측 하단에 상세 이유 출력
+                                    st.toast(f"❌ 분석 건너뜀 ({result}): {video['title'][:15]}...")
+                                    
                             progress_bar.progress((i + 1) / len(videos))
-                        st.success(f"✅ 분석 완료! 총 {success_count}개의 새로운 인사이트가 저장되었습니다.")
+                        st.success(f"✅ 작업 완료! 총 {success_count}개의 새로운 인사이트가 저장되었습니다.")
 
+    # 매일 업데이트용 버튼 로직도 위와 동일하게 방어 로직 적용
     with col2:
-        if st.button("▶️ 오늘 새로 출연하신 영상 찾기 (매일 업데이트용)", type="primary", use_container_width=True):
+        if st.button("▶️ 오늘 새 영상 확인하기", type="primary", use_container_width=True):
             if not google_api_key:
                 st.error("좌측 상단에 Google API Key를 입력해야 실행됩니다.")
             else:
-                with st.spinner('새로운 인터뷰 영상이 있는지 확인 중입니다...'):
+                with st.spinner('새로운 인터뷰 영상을 확인 중입니다...'):
                     videos = search_recent_videos(selected_expert, max_results=5) 
                     
                     if not videos:
@@ -172,7 +199,7 @@ if selected_expert:
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                             if c.fetchone() is None:
                                 result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
-                                if result:
+                                if isinstance(result, dict):
                                     new_found = True
                                     formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
                                     c.execute('''INSERT INTO analysis (date, expert_name, video_title, video_url, market_view, macro_view, buy_recom, sell_recom)
@@ -180,10 +207,12 @@ if selected_expert:
                                               (formatted_date, selected_expert, video['title'], video['url'], 
                                                result["market_view"], result["macro_view"], result["buy_recom"], result["sell_recom"]))
                                     conn.commit()
+                                else:
+                                    st.toast(f"❌ 분석 건너뜀 ({result}): {video['title'][:15]}...")
                         if new_found:
-                            st.success("✅ 새로운 영상 분석 완료! 하단에 추가되었습니다.")
+                            st.success("✅ 새로운 영상 분석 완료!")
                         else:
-                            st.info("아직 새롭게 출연하신 영상이 없습니다.")
+                            st.info("새롭게 분석할 만한 영상이 없습니다.")
 
     st.markdown("---")
     
@@ -198,7 +227,3 @@ if selected_expert:
                 st.markdown(f"**🔴 매수 추천:** {row['buy_recom']}")
                 st.markdown(f"**🔵 매도 추천:** {row['sell_recom']}")
                 st.markdown(f"[원본 유튜브 영상 보러가기]({row['video_url']})")
-    else:
-        st.info("아직 수집된 데이터가 없습니다. 상단의 버튼을 눌러 초기 세팅을 진행해 주세요.")
-else:
-    st.info("👈 좌측에서 관심 있는 전문가를 먼저 추가해 주세요.")
