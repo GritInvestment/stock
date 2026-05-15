@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import datetime
 import os
+import time  # ⭐️ 시간 텀을 주기 위한 부품 추가
 import google.generativeai as genai
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtubesearchpython import CustomSearch, VideoSortOrder
@@ -32,7 +33,7 @@ def init_db():
 init_db()
 
 # --- 유튜브 검색 로직 ---
-def search_recent_videos(expert_name, max_results=30):
+def search_recent_videos(expert_name, max_results=5): # 기본 검색량을 30개에서 5개로 축소
     videos = []
     try:
         customSearch = CustomSearch(f"{expert_name} 주식", VideoSortOrder.uploadDate, limit=max_results)
@@ -44,10 +45,9 @@ def search_recent_videos(expert_name, max_results=30):
         st.error(f"영상 검색 중 오류 발생: {e}")
     return videos
 
-# --- AI 분석 로직 (자막이 없으면 직접 오디오를 듣는 로직 추가) ---
+# --- AI 분석 로직 (403 우회 유지) ---
 def analyze_video_with_gemini(video_url, expert_name, api_key):
     try:
-        # 1. 안전한 Video ID 추출
         video_id = ""
         if "v=" in video_url:
             video_id = video_url.split("v=")[-1].split("&")[0]
@@ -75,29 +75,27 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
 
         transcript_text = None
 
-        # 2. 가장 빠르고 저렴한 '자막 추출' 먼저 시도
         try:
             transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['ko'])
             transcript_text = " ".join([t['text'] for t in transcript_list])
             if len(transcript_text) < 100:
-                transcript_text = None # 자막이 너무 짧으면 가짜 자막으로 간주하고 오디오로 넘김
+                transcript_text = None 
             else:
                 transcript_text = transcript_text[:15000]
         except Exception:
-            pass # 자막 없으면 자연스럽게 패스
+            pass 
 
-        # 3. AI 분석 실행 (자막 유무에 따라 분기)
         if transcript_text:
-            # [플랜 A] 자막이 있는 경우: 텍스트를 읽어서 분석 (3초 컷)
             full_prompt = prompt + f"\n\n스크립트: {transcript_text}"
             response = model.generate_content(full_prompt)
         else:
-            # [플랜 B] 자막이 없는 경우: 오디오를 직접 다운받아 AI에게 듣게 함 (약 10~30초 소요)
+            # 안드로이드 모바일 기기로 위장
             ydl_opts = {
-                'format': 'm4a/bestaudio/worst', # 오디오 포맷 최우선 추출
+                'format': 'm4a/bestaudio/worst', 
                 'outtmpl': f'{video_id}.%(ext)s',
                 'quiet': True,
-                'noplaylist': True
+                'noplaylist': True,
+                'extractor_args': {'youtube': ['player_client=android,ios,web']} 
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -106,13 +104,8 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
                 audio_filename = f"{video_id}.{ext}"
 
             try:
-                # 구글 AI 서버로 오디오 파일 임시 업로드
                 uploaded_file = genai.upload_file(path=audio_filename)
-                
-                # AI가 직접 오디오를 들으며 요약
                 response = model.generate_content([prompt, uploaded_file])
-                
-                # 분석 끝난 후 서버 및 로컬에 남은 파일 깔끔하게 청소
                 genai.delete_file(uploaded_file.name)
             finally:
                 if os.path.exists(audio_filename):
@@ -165,19 +158,20 @@ with st.sidebar:
 
 if selected_expert:
     st.title(f"📈 '{selected_expert}' 인사이트 타임라인")
-    st.caption("🤖 자막이 없는 영상은 AI가 직접 '오디오'를 듣고 요약합니다.")
+    st.caption("🤖 차단 우회 중: 사람이 직접 보는 것처럼 5개씩 천천히 스캔합니다.")
     
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("🔄 최근 영상 30개 분석 (초기 세팅용)", use_container_width=True):
+        # 대표님 의견 반영: 30개에서 5개로 변경
+        if st.button("🔄 최근 영상 5개 분석 (천천히 수집)", use_container_width=True):
             if not google_api_key:
                 st.error("좌측 상단에 Google API Key를 입력해야 실행됩니다.")
             else:
-                with st.spinner(f'영상을 수집하고 분석 중입니다. (자막이 없는 영상은 AI가 오디오를 듣느라 시간이 조금 더 걸립니다)...'):
-                    videos = search_recent_videos(selected_expert, max_results=30)
+                with st.spinner(f'영상을 1개씩 천천히 수집하고 분석 중입니다...'):
+                    videos = search_recent_videos(selected_expert, max_results=5)
                     
                     if not videos:
                         st.warning("영상을 찾지 못했습니다.")
@@ -204,6 +198,9 @@ if selected_expert:
                                     success_count += 1
                                 else:
                                     error_logs.append(f"[{video['title'][:30]}...] ❌ 사유: {result}")
+                                
+                                # ⭐️ 대표님 아이디어 적용: 영상 하나 분석 후 5초간 대기 (유튜브 감시망 회피) ⭐️
+                                time.sleep(5)
                                     
                             progress_bar.progress((i + 1) / len(videos))
                         
@@ -213,7 +210,7 @@ if selected_expert:
                             st.warning("작업 완료! 새로운 인사이트가 저장되지 않았습니다.")
                         
                         if error_logs:
-                            with st.expander(f"⚠️ 총 {len(error_logs)}개 영상 분석 실패 내역 보기"):
+                            with st.expander(f"⚠️ 영상 분석 실패 내역 보기"):
                                 for err in error_logs:
                                     st.write(err)
 
@@ -222,7 +219,7 @@ if selected_expert:
             if not google_api_key:
                 st.error("좌측 상단에 Google API Key를 입력해야 실행됩니다.")
             else:
-                with st.spinner('새로운 인터뷰 영상을 확인 중입니다...'):
+                with st.spinner('새로운 인터뷰 영상을 천천히 확인 중입니다...'):
                     videos = search_recent_videos(selected_expert, max_results=5) 
                     
                     if not videos:
@@ -246,6 +243,9 @@ if selected_expert:
                                     conn.commit()
                                 else:
                                     error_logs.append(f"[{video['title'][:30]}...] ❌ 사유: {result}")
+                                
+                                # ⭐️ 여기서도 5초 대기 적용 ⭐️
+                                time.sleep(5)
                         
                         if new_found:
                             st.success("✅ 새로운 영상 분석 완료!")
