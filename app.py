@@ -41,7 +41,6 @@ def search_recent_videos(expert_name, max_results=1):
         st.error(f"영상 검색 오류: {e}")
     return videos
 
-# ⭐️ UI에서 선택한 모델 이름을 그대로 받아오도록 수정 (model_name 추가)
 def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
     try:
         video_id = ""
@@ -55,8 +54,8 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
             return "지원하지 않는 영상 링크입니다."
 
         genai.configure(api_key=api_key)
-        # 선택한 모델 이름으로 AI 호출
-        model = genai.GenerativeModel(model_name) 
+        final_model_name = model_name if model_name.startswith("models/") else f"models/{model_name}"
+        model = genai.GenerativeModel(final_model_name) 
         
         prompt = f"""
         당신은 100억 자산가를 위한 수석 투자 비서입니다. 
@@ -70,7 +69,6 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
 
         transcript_text = None
         
-        # 1차 시도: 자막(대본) 추출
         try:
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             try:
@@ -88,7 +86,6 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
         except Exception:
             pass 
 
-        # ⭐️ 이모티콘 및 Latin-1 인코딩 버그 원천 차단 방어막 코드 ⭐️
         prompt_bytes = prompt.encode('utf-8', errors='ignore')
         safe_prompt = prompt_bytes.decode('utf-8')
 
@@ -98,7 +95,6 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
             full_prompt = safe_prompt + f"\n\n스크립트: {safe_transcript}"
             response = model.generate_content(full_prompt)
         else:
-            # 2차 시도: 오디오/비디오 다운로드 후 AI 연동
             ydl_opts = {
                 'format': '18/b/w/ba/wa', 
                 'outtmpl': f'{video_id}.%(ext)s',
@@ -115,6 +111,15 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
 
             try:
                 uploaded_file = genai.upload_file(path=audio_filename)
+                
+                # ⭐️ 핵심 변경: 구글 AI가 파일을 다 읽을 때까지 기다려주는 매너 로직 추가 ⭐️
+                while uploaded_file.state.name == 'PROCESSING':
+                    time.sleep(2) # 2초 기다렸다가
+                    uploaded_file = genai.get_file(uploaded_file.name) # 상태 다시 확인
+                    
+                if uploaded_file.state.name == 'FAILED':
+                    return "분석 오류: 구글 AI가 오디오 파일을 처리하지 못했습니다."
+
                 response = model.generate_content([safe_prompt, uploaded_file])
                 genai.delete_file(uploaded_file.name)
             finally:
@@ -143,11 +148,16 @@ with st.sidebar:
     google_api_key = st.text_input("Google API Key 입력", type="password")
     
     st.markdown("---")
-    # ⭐️ 속도와 에러를 한방에 해결할 수 있는 신규 조작 패널 ⭐️
     st.header("🤖 AI 및 수집 설정")
+    
     ai_model_choice = st.selectbox(
-        "AI 모델 선택 (에러 시 변경해보세요)", 
-        ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+        "AI 모델 선택 (에러 시 순서대로 변경해보세요)", 
+        [
+            "gemini-2.5-flash", 
+            "gemini-1.5-flash-8b", 
+            "gemini-1.5-flash", 
+            "gemini-1.5-pro"
+        ]
     )
     collect_count = st.radio(
         "한 번에 분석할 영상 개수", 
@@ -181,7 +191,7 @@ with st.sidebar:
 
 if selected_expert:
     st.title(f"📈 '{selected_expert}' 인사이트 타임라인")
-    st.caption(f"🚀 가동 모드: [{ai_model_choice}] 모델 / 영상 [{collect_count}개] 추출 모드")
+    st.caption(f"🚀 가동 모드: [{ai_model_choice}] 최신 모델 적용 / 영상 [{collect_count}개] 추출 모드")
     
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -205,7 +215,6 @@ if selected_expert:
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                             if c.fetchone() is None:
                                 st.toast(f"진행 중: {video['title'][:15]}...")
-                                # 선택된 모델 이름을 함수로 전달
                                 result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key, ai_model_choice)
                                 
                                 if isinstance(result, dict):
