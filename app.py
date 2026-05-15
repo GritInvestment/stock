@@ -41,7 +41,8 @@ def search_recent_videos(expert_name, max_results=1):
         st.error(f"영상 검색 오류: {e}")
     return videos
 
-def analyze_video_with_gemini(video_url, expert_name, api_key):
+# ⭐️ UI에서 선택한 모델 이름을 그대로 받아오도록 수정 (model_name 추가)
+def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
     try:
         video_id = ""
         if "v=" in video_url:
@@ -53,9 +54,9 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
         else:
             return "지원하지 않는 영상 링크입니다."
 
-        # 구글 AI 설정 및 호환성 높은 공식 모델 명칭 적용
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('models/gemini-1.5-flash') 
+        # 선택한 모델 이름으로 AI 호출
+        model = genai.GenerativeModel(model_name) 
         
         prompt = f"""
         당신은 100억 자산가를 위한 수석 투자 비서입니다. 
@@ -87,7 +88,7 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
         except Exception:
             pass 
 
-        # ⭐️ 이모티콘 및 Latin-1 인코딩 버그 원천 차단 방어막 코드
+        # ⭐️ 이모티콘 및 Latin-1 인코딩 버그 원천 차단 방어막 코드 ⭐️
         prompt_bytes = prompt.encode('utf-8', errors='ignore')
         safe_prompt = prompt_bytes.decode('utf-8')
 
@@ -142,8 +143,12 @@ with st.sidebar:
     google_api_key = st.text_input("Google API Key 입력", type="password")
     
     st.markdown("---")
-    st.header("⚙️ 수집 분량 설정")
-    # 대표님께서 제어하기 편하시도록 사이드바에 개수 선택기 배치
+    # ⭐️ 속도와 에러를 한방에 해결할 수 있는 신규 조작 패널 ⭐️
+    st.header("🤖 AI 및 수집 설정")
+    ai_model_choice = st.selectbox(
+        "AI 모델 선택 (에러 시 변경해보세요)", 
+        ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+    )
     collect_count = st.radio(
         "한 번에 분석할 영상 개수", 
         [1, 5], 
@@ -176,7 +181,7 @@ with st.sidebar:
 
 if selected_expert:
     st.title(f"📈 '{selected_expert}' 인사이트 타임라인")
-    st.caption(f"🚀 가동 모드: [models/gemini-1.5-flash] 고정 / 영상 [{collect_count}개] 추출 모드")
+    st.caption(f"🚀 가동 모드: [{ai_model_choice}] 모델 / 영상 [{collect_count}개] 추출 모드")
     
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -200,7 +205,8 @@ if selected_expert:
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                             if c.fetchone() is None:
                                 st.toast(f"진행 중: {video['title'][:15]}...")
-                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
+                                # 선택된 모델 이름을 함수로 전달
+                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key, ai_model_choice)
                                 
                                 if isinstance(result, dict):
                                     formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -238,7 +244,7 @@ if selected_expert:
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                             if c.fetchone() is None:
                                 st.toast(f"진행 중: {video['title'][:15]}...")
-                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
+                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key, ai_model_choice)
                                 if isinstance(result, dict):
                                     new_found = True
                                     formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
