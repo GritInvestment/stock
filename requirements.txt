@@ -4,3 +4,4 @@ google-generativeai
 youtube-transcript-api
 youtube-search-python
 httpx==0.27.2
+yt-dlp
