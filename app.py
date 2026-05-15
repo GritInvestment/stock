@@ -9,16 +9,13 @@ import yt_dlp
 # --- 페이지 설정 ---
 st.set_page_config(page_title="💰 100억 투자 비서", page_icon="📈", layout="wide")
 
-# ★ 핵심 해결 부분: DB 이름을 stock_v2.db 로 변경하여 기존 충돌을 무시합니다 ★
 DB_NAME = 'stock_v2.db' 
 
 # --- DB 초기화 ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # 전문가 테이블
     c.execute('''CREATE TABLE IF NOT EXISTS experts (id INTEGER PRIMARY KEY, name TEXT UNIQUE)''')
-    # 분석 결과 테이블
     c.execute('''CREATE TABLE IF NOT EXISTS analysis 
                  (id INTEGER PRIMARY KEY, date TEXT, expert_name TEXT, video_title TEXT, video_url TEXT,
                   market_view TEXT, macro_view TEXT, buy_recom TEXT, sell_recom TEXT)''')
@@ -40,14 +37,18 @@ def search_recent_videos(expert_name, max_results=30):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(search_query, download=False)
-            if 'entries' in info:
-                for entry in info['entries']:
-                    if entry: 
-                        videos.append({
-                            'title': entry.get('title'),
-                            'url': entry.get('url'),
-                            'date': entry.get('upload_date')
-                        })
+            
+            # ★ 에러 해결: info 자체가 None(빈 깡통)인지 먼저 확인하는 안전장치 추가 ★
+            if info is not None and 'entries' in info:
+                entries = info.get('entries')
+                if entries is not None:
+                    for entry in entries:
+                        if entry and entry.get('url'): 
+                            videos.append({
+                                'title': entry.get('title'),
+                                'url': entry.get('url'),
+                                'date': entry.get('upload_date')
+                            })
     except Exception as e:
         st.error(f"영상 검색 중 오류 발생: {e}")
     return videos
@@ -137,25 +138,28 @@ if selected_expert:
             if not google_api_key:
                 st.error("좌측 상단에 Google API Key를 입력해야 실행됩니다.")
             else:
-                with st.spinner(f'유튜브 전체에서 {selected_expert}님의 최근 영상 30개를 찾아 분석 중입니다...'):
+                with st.spinner(f'유튜브 전체에서 {selected_expert}님의 최근 영상을 찾아 분석 중입니다...'):
                     videos = search_recent_videos(selected_expert, max_results=30)
-                    progress_bar = st.progress(0)
                     
-                    success_count = 0
-                    for i, video in enumerate(videos):
-                        c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
-                        if c.fetchone() is None:
-                            result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
-                            if result:
-                                formatted_date = f"{video['date'][:4]}-{video['date'][4:6]}-{video['date'][6:]}" if video['date'] else datetime.datetime.now().strftime("%Y-%m-%d")
-                                c.execute('''INSERT INTO analysis (date, expert_name, video_title, video_url, market_view, macro_view, buy_recom, sell_recom)
-                                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
-                                          (formatted_date, selected_expert, video['title'], video['url'], 
-                                           result["market_view"], result["macro_view"], result["buy_recom"], result["sell_recom"]))
-                                conn.commit()
-                                success_count += 1
-                        progress_bar.progress((i + 1) / len(videos))
-                    st.success(f"✅ 분석 완료! 총 {success_count}개의 새로운 인사이트가 저장되었습니다.")
+                    if not videos:
+                        st.warning("영상을 찾지 못했거나 유튜브에서 검색을 일시적으로 차단했습니다. 잠시 후 다시 시도해주세요.")
+                    else:
+                        progress_bar = st.progress(0)
+                        success_count = 0
+                        for i, video in enumerate(videos):
+                            c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
+                            if c.fetchone() is None:
+                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
+                                if result:
+                                    formatted_date = f"{video['date'][:4]}-{video['date'][4:6]}-{video['date'][6:]}" if video['date'] else datetime.datetime.now().strftime("%Y-%m-%d")
+                                    c.execute('''INSERT INTO analysis (date, expert_name, video_title, video_url, market_view, macro_view, buy_recom, sell_recom)
+                                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                                              (formatted_date, selected_expert, video['title'], video['url'], 
+                                               result["market_view"], result["macro_view"], result["buy_recom"], result["sell_recom"]))
+                                    conn.commit()
+                                    success_count += 1
+                            progress_bar.progress((i + 1) / len(videos))
+                        st.success(f"✅ 분석 완료! 총 {success_count}개의 새로운 인사이트가 저장되었습니다.")
 
     with col2:
         if st.button("▶️ 오늘 새로 출연하신 영상 찾기 (매일 업데이트용)", type="primary", use_container_width=True):
@@ -164,23 +168,27 @@ if selected_expert:
             else:
                 with st.spinner('새로운 인터뷰 영상이 있는지 확인 중입니다...'):
                     videos = search_recent_videos(selected_expert, max_results=5) 
-                    new_found = False
-                    for video in videos:
-                        c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
-                        if c.fetchone() is None:
-                            result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
-                            if result:
-                                new_found = True
-                                formatted_date = f"{video['date'][:4]}-{video['date'][4:6]}-{video['date'][6:]}" if video['date'] else datetime.datetime.now().strftime("%Y-%m-%d")
-                                c.execute('''INSERT INTO analysis (date, expert_name, video_title, video_url, market_view, macro_view, buy_recom, sell_recom)
-                                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
-                                          (formatted_date, selected_expert, video['title'], video['url'], 
-                                           result["market_view"], result["macro_view"], result["buy_recom"], result["sell_recom"]))
-                                conn.commit()
-                    if new_found:
-                        st.success("✅ 새로운 영상 분석 완료! 하단에 추가되었습니다.")
+                    
+                    if not videos:
+                        st.warning("영상을 찾지 못했습니다.")
                     else:
-                        st.info("아직 새롭게 출연하신 영상이 없습니다.")
+                        new_found = False
+                        for video in videos:
+                            c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
+                            if c.fetchone() is None:
+                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
+                                if result:
+                                    new_found = True
+                                    formatted_date = f"{video['date'][:4]}-{video['date'][4:6]}-{video['date'][6:]}" if video['date'] else datetime.datetime.now().strftime("%Y-%m-%d")
+                                    c.execute('''INSERT INTO analysis (date, expert_name, video_title, video_url, market_view, macro_view, buy_recom, sell_recom)
+                                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                                              (formatted_date, selected_expert, video['title'], video['url'], 
+                                               result["market_view"], result["macro_view"], result["buy_recom"], result["sell_recom"]))
+                                    conn.commit()
+                        if new_found:
+                            st.success("✅ 새로운 영상 분석 완료! 하단에 추가되었습니다.")
+                        else:
+                            st.info("아직 새롭게 출연하신 영상이 없습니다.")
 
     st.markdown("---")
     
