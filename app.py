@@ -28,7 +28,7 @@ def init_db():
 
 init_db()
 
-def search_recent_videos(expert_name, max_results=5):
+def search_recent_videos(expert_name, max_results=1):
     videos = []
     try:
         customSearch = CustomSearch(f"{expert_name} 주식", VideoSortOrder.uploadDate, limit=max_results)
@@ -40,7 +40,7 @@ def search_recent_videos(expert_name, max_results=5):
         st.error(f"영상 검색 오류: {e}")
     return videos
 
-def analyze_video_with_gemini(video_url, expert_name, api_key):
+def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
     try:
         video_id = ""
         if "v=" in video_url:
@@ -53,7 +53,9 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
             return "지원하지 않는 영상 링크입니다."
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash') 
+        
+        # ⭐️ UI에서 선택한 모델 이름을 그대로 구글 AI에게 전달
+        model = genai.GenerativeModel(model_name) 
         
         prompt = f"""
         당신은 100억 자산가를 위한 수석 투자 비서입니다. 
@@ -66,16 +68,12 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
         """
 
         transcript_text = None
-        transcript_err = ""
-
-        # --- 1. 초강력 자막 추출 (영어 등 타언어 자동번역 포함) ---
+        
         try:
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             try:
-                # 먼저 한국어 자막 시도
                 transcript = transcript_list.find_transcript(['ko'])
             except:
-                # 한국어가 없으면 존재하는 첫 번째 자막을 강제로 한국어로 번역해서 가져옴 (무적 로직)
                 transcript = next(iter(transcript_list))
                 transcript = transcript.translate('ko')
             
@@ -85,28 +83,26 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
                 transcript_text = None 
             else:
                 transcript_text = transcript_text[:15000]
-        except Exception as e:
-            transcript_err = str(e) # 자막 실패 이유 저장
+        except Exception:
             pass 
 
-        # --- 2. AI 분석 실행 ---
-        if transcript_text:
+       if transcript_text:
             full_prompt = prompt + f"\n\n스크립트: {transcript_text}"
             response = model.generate_content(full_prompt)
         else:
-            # --- 3. 오디오 우회 추출 (웹 등 다른 것 섞지 않고 '오직 최신 안드로이드'로만 완벽 위장) ---
+            # ⭐️ 핵심 변경: cookiefile 속성을 추가하여 유튜브 정문을 무사통과합니다 ⭐️
             ydl_opts = {
-                'format': 'm4a/bestaudio/worst', 
+                'format': '18/b/w/ba/wa', 
                 'outtmpl': f'{video_id}.%(ext)s',
                 'quiet': True,
                 'noplaylist': True,
                 'nocheckcertificate': True,
-                'extractor_args': {'youtube': ['player_client=android']} # 웹 혼합 제거, 모바일 전용 위장
+                'cookiefile': 'cookies.txt'  # 방금 다운받은 신분증 제출!
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
-                ext = info.get('ext', 'm4a')
+                ext = info.get('ext', 'mp4') 
                 audio_filename = f"{video_id}.{ext}"
 
             try:
@@ -131,15 +127,26 @@ def analyze_video_with_gemini(video_url, expert_name, api_key):
             "sell_recom": extract_section("매도 추천")
         }
     except Exception as e:
-        # 에러 메시지를 더 상세하게 반환하여 디버깅 용이
-        if transcript_err:
-            return f"자막 차단됨 / 오디오 차단됨 (403): 유튜브가 서버 IP를 완전히 막았습니다."
-        return f"분석 오류: {str(e)}"
+        return f"분석 오류: AI 모델({model_name}) 실패 - {str(e)}"
 
 # --- UI 로직 ---
 with st.sidebar:
     st.header("⚙️ 시스템 설정")
     google_api_key = st.text_input("Google API Key 입력", type="password")
+    
+    st.markdown("---")
+    # ⭐️ 속도와 에러를 한방에 해결할 수 있는 신규 조작 패널 ⭐️
+    st.header("🤖 AI 및 수집 설정")
+    ai_model_choice = st.selectbox(
+        "AI 모델 선택 (에러 시 변경해보세요)", 
+        ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+    )
+    collect_count = st.radio(
+        "수집 영상 개수", 
+        [1, 5], 
+        index=0, 
+        format_func=lambda x: f"{x}개 (초고속 테스트용)" if x==1 else f"{x}개 (정식 가동용)"
+    )
     
     st.markdown("---")
     st.header("👥 관심 전문가")
@@ -166,18 +173,22 @@ with st.sidebar:
 
 if selected_expert:
     st.title(f"📈 '{selected_expert}' 인사이트 타임라인")
+    st.caption(f"🚀 현재 설정: [{ai_model_choice}] 모델 / 영상 [{collect_count}개] 수집")
     
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("🔄 최근 영상 5개 수집", use_container_width=True):
-            if not google_api_key:
+        # 버튼도 선택한 갯수에 맞게 이름이 바뀝니다
+        if st.button(f"🔄 최근 영상 {collect_count}개 수집", use_container_width=True):
+            if not os.path.exists('cookies.txt'):
+                st.error("🚨 폴더 안에 cookies.txt 파일이 없습니다! 먼저 유튜브 쿠키를 추출해 넣어주세요.")
+            elif not google_api_key:
                 st.error("Google API Key를 입력해야 실행됩니다.")
             else:
-                with st.spinner(f'영상을 1개씩 천천히 수집하고 분석 중입니다...'):
-                    videos = search_recent_videos(selected_expert, max_results=5)
+                with st.spinner(f'영상을 {collect_count}개 수집하고 분석 중입니다...'):
+                    videos = search_recent_videos(selected_expert, max_results=collect_count)
                     if not videos:
                         st.warning("영상을 찾지 못했습니다.")
                     else:
@@ -187,7 +198,7 @@ if selected_expert:
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                             if c.fetchone() is None:
                                 st.toast(f"진행 중: {video['title'][:15]}...")
-                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
+                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key, ai_model_choice)
                                 
                                 if isinstance(result, dict):
                                     formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -199,7 +210,7 @@ if selected_expert:
                                     success_count += 1
                                 else:
                                     error_logs.append(f"[{video['title'][:30]}...] ❌ 사유: {result}")
-                                time.sleep(5)
+                                time.sleep(3)
                             progress_bar.progress((i + 1) / len(videos))
                         
                         if success_count > 0: st.success(f"✅ 총 {success_count}개 저장 완료!")
@@ -210,11 +221,13 @@ if selected_expert:
 
     with col2:
         if st.button("▶️ 오늘 새 영상 확인하기", type="primary", use_container_width=True):
-            if not google_api_key:
+            if not os.path.exists('cookies.txt'):
+                st.error("🚨 폴더 안에 cookies.txt 파일이 없습니다! 먼저 유튜브 쿠키를 추출해 넣어주세요.")
+            elif not google_api_key:
                 st.error("Google API Key를 입력해야 실행됩니다.")
             else:
                 with st.spinner('새로운 인터뷰 영상을 천천히 확인 중입니다...'):
-                    videos = search_recent_videos(selected_expert, max_results=5) 
+                    videos = search_recent_videos(selected_expert, max_results=collect_count) 
                     if not videos:
                         st.warning("영상을 찾지 못했습니다.")
                     else:
@@ -223,7 +236,7 @@ if selected_expert:
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                             if c.fetchone() is None:
                                 st.toast(f"진행 중: {video['title'][:15]}...")
-                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
+                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key, ai_model_choice)
                                 if isinstance(result, dict):
                                     new_found = True
                                     formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -234,7 +247,7 @@ if selected_expert:
                                     conn.commit()
                                 else:
                                     error_logs.append(f"[{video['title'][:30]}...] ❌ 사유: {result}")
-                                time.sleep(5)
+                                time.sleep(3)
                         
                         if new_found: st.success("✅ 새로운 영상 분석 완료!")
                         else: st.info("새롭게 분석할 만한 영상이 없습니다.")
