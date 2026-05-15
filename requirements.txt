@@ -2,3 +2,4 @@ streamlit
 pandas
 google-generativeai
 youtube-transcript-api
+yt-dlp
