@@ -9,6 +9,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtubesearchpython import CustomSearch, VideoSortOrder
 import yt_dlp
 
+# --- UI 초기 설정 ---
 st.set_page_config(page_title="💰 100억 투자 비서", page_icon="📈", layout="wide")
 
 DB_NAME = 'stock_v2.db' 
@@ -40,7 +41,7 @@ def search_recent_videos(expert_name, max_results=1):
         st.error(f"영상 검색 오류: {e}")
     return videos
 
-def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
+def analyze_video_with_gemini(video_url, expert_name, api_key):
     try:
         video_id = ""
         if "v=" in video_url:
@@ -52,10 +53,9 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
         else:
             return "지원하지 않는 영상 링크입니다."
 
+        # 구글 AI 설정 및 호환성 높은 공식 모델 명칭 적용
         genai.configure(api_key=api_key)
-        
-        # ⭐️ UI에서 선택한 모델 이름을 그대로 구글 AI에게 전달
-        model = genai.GenerativeModel(model_name) 
+        model = genai.GenerativeModel('models/gemini-1.5-flash') 
         
         prompt = f"""
         당신은 100억 자산가를 위한 수석 투자 비서입니다. 
@@ -69,6 +69,7 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
 
         transcript_text = None
         
+        # 1차 시도: 자막(대본) 추출
         try:
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             try:
@@ -86,18 +87,24 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
         except Exception:
             pass 
 
-       if transcript_text:
-            full_prompt = prompt + f"\n\n스크립트: {transcript_text}"
+        # ⭐️ 이모티콘 및 Latin-1 인코딩 버그 원천 차단 방어막 코드
+        prompt_bytes = prompt.encode('utf-8', errors='ignore')
+        safe_prompt = prompt_bytes.decode('utf-8')
+
+        if transcript_text:
+            text_bytes = transcript_text.encode('utf-8', errors='ignore')
+            safe_transcript = text_bytes.decode('utf-8')
+            full_prompt = safe_prompt + f"\n\n스크립트: {safe_transcript}"
             response = model.generate_content(full_prompt)
         else:
-            # ⭐️ 핵심 변경: cookiefile 속성을 추가하여 유튜브 정문을 무사통과합니다 ⭐️
+            # 2차 시도: 오디오/비디오 다운로드 후 AI 연동
             ydl_opts = {
                 'format': '18/b/w/ba/wa', 
                 'outtmpl': f'{video_id}.%(ext)s',
                 'quiet': True,
                 'noplaylist': True,
                 'nocheckcertificate': True,
-                'cookiefile': 'cookies.txt'  # 방금 다운받은 신분증 제출!
+                'cookiefile': 'cookies.txt'  
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -107,7 +114,7 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
 
             try:
                 uploaded_file = genai.upload_file(path=audio_filename)
-                response = model.generate_content([prompt, uploaded_file])
+                response = model.generate_content([safe_prompt, uploaded_file])
                 genai.delete_file(uploaded_file.name)
             finally:
                 if os.path.exists(audio_filename):
@@ -127,29 +134,25 @@ def analyze_video_with_gemini(video_url, expert_name, api_key, model_name):
             "sell_recom": extract_section("매도 추천")
         }
     except Exception as e:
-        return f"분석 오류: AI 모델({model_name}) 실패 - {str(e)}"
+        return f"분석 오류 발생 - {str(e)}"
 
-# --- UI 로직 ---
+# --- UI 로직 영역 ---
 with st.sidebar:
     st.header("⚙️ 시스템 설정")
     google_api_key = st.text_input("Google API Key 입력", type="password")
     
     st.markdown("---")
-    # ⭐️ 속도와 에러를 한방에 해결할 수 있는 신규 조작 패널 ⭐️
-    st.header("🤖 AI 및 수집 설정")
-    ai_model_choice = st.selectbox(
-        "AI 모델 선택 (에러 시 변경해보세요)", 
-        ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
-    )
+    st.header("⚙️ 수집 분량 설정")
+    # 대표님께서 제어하기 편하시도록 사이드바에 개수 선택기 배치
     collect_count = st.radio(
-        "수집 영상 개수", 
+        "한 번에 분석할 영상 개수", 
         [1, 5], 
         index=0, 
         format_func=lambda x: f"{x}개 (초고속 테스트용)" if x==1 else f"{x}개 (정식 가동용)"
     )
     
     st.markdown("---")
-    st.header("👥 관심 전문가")
+    st.header("👥 관심 전문가 목록")
     
     conn = sqlite3.connect(DB_NAME)
     experts_df = pd.read_sql_query("SELECT * FROM experts", conn)
@@ -173,15 +176,14 @@ with st.sidebar:
 
 if selected_expert:
     st.title(f"📈 '{selected_expert}' 인사이트 타임라인")
-    st.caption(f"🚀 현재 설정: [{ai_model_choice}] 모델 / 영상 [{collect_count}개] 수집")
+    st.caption(f"🚀 가동 모드: [models/gemini-1.5-flash] 고정 / 영상 [{collect_count}개] 추출 모드")
     
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
     col1, col2 = st.columns([1, 1])
     with col1:
-        # 버튼도 선택한 갯수에 맞게 이름이 바뀝니다
-        if st.button(f"🔄 최근 영상 {collect_count}개 수집", use_container_width=True):
+        if st.button(f"🔄 최근 영상 {collect_count}개 수집 및 요약", use_container_width=True):
             if not os.path.exists('cookies.txt'):
                 st.error("🚨 폴더 안에 cookies.txt 파일이 없습니다! 먼저 유튜브 쿠키를 추출해 넣어주세요.")
             elif not google_api_key:
@@ -198,7 +200,7 @@ if selected_expert:
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                             if c.fetchone() is None:
                                 st.toast(f"진행 중: {video['title'][:15]}...")
-                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key, ai_model_choice)
+                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
                                 
                                 if isinstance(result, dict):
                                     formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -236,7 +238,7 @@ if selected_expert:
                             c.execute("SELECT id FROM analysis WHERE video_url=?", (video['url'],))
                             if c.fetchone() is None:
                                 st.toast(f"진행 중: {video['title'][:15]}...")
-                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key, ai_model_choice)
+                                result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
                                 if isinstance(result, dict):
                                     new_found = True
                                     formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
