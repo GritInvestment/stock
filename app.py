@@ -4,7 +4,7 @@ import sqlite3
 import datetime
 import google.generativeai as genai
 from youtube_transcript_api import YouTubeTranscriptApi
-import yt_dlp
+from youtubesearchpython import CustomSearch, VideoSortOrder
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="💰 100억 투자 비서", page_icon="📈", layout="wide")
@@ -29,26 +29,21 @@ def init_db():
 
 init_db()
 
-# --- 유튜브 전체 최신 검색 로직 (yt-dlp) ---
+# --- ★ 새로운 스텔스 유튜브 검색 로직 ★ ---
 def search_recent_videos(expert_name, max_results=30):
-    search_query = f"ytsearchdate{max_results}:\"{expert_name} 주식\""
-    ydl_opts = {'extract_flat': True, 'quiet': True, 'ignoreerrors': True}
+    """유튜브 봇 차단을 우회하는 가벼운 검색 엔진을 사용하여 최신순으로 가져옵니다."""
     videos = []
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_query, download=False)
-            
-            # ★ 에러 해결: info 자체가 None(빈 깡통)인지 먼저 확인하는 안전장치 추가 ★
-            if info is not None and 'entries' in info:
-                entries = info.get('entries')
-                if entries is not None:
-                    for entry in entries:
-                        if entry and entry.get('url'): 
-                            videos.append({
-                                'title': entry.get('title'),
-                                'url': entry.get('url'),
-                                'date': entry.get('upload_date')
-                            })
+        # 전문가 이름 + 주식 키워드로 '최신 업로드 순' 검색
+        customSearch = CustomSearch(f"{expert_name} 주식", VideoSortOrder.uploadDate, limit=max_results)
+        results = customSearch.result().get('result', [])
+        
+        for entry in results:
+            if entry and entry.get('link'):
+                videos.append({
+                    'title': entry.get('title'),
+                    'url': entry.get('link')
+                })
     except Exception as e:
         st.error(f"영상 검색 중 오류 발생: {e}")
     return videos
@@ -142,7 +137,7 @@ if selected_expert:
                     videos = search_recent_videos(selected_expert, max_results=30)
                     
                     if not videos:
-                        st.warning("영상을 찾지 못했거나 유튜브에서 검색을 일시적으로 차단했습니다. 잠시 후 다시 시도해주세요.")
+                        st.warning("영상을 찾지 못했습니다. 잠시 후 다시 시도해주세요.")
                     else:
                         progress_bar = st.progress(0)
                         success_count = 0
@@ -151,7 +146,7 @@ if selected_expert:
                             if c.fetchone() is None:
                                 result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
                                 if result:
-                                    formatted_date = f"{video['date'][:4]}-{video['date'][4:6]}-{video['date'][6:]}" if video['date'] else datetime.datetime.now().strftime("%Y-%m-%d")
+                                    formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
                                     c.execute('''INSERT INTO analysis (date, expert_name, video_title, video_url, market_view, macro_view, buy_recom, sell_recom)
                                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
                                               (formatted_date, selected_expert, video['title'], video['url'], 
@@ -179,7 +174,7 @@ if selected_expert:
                                 result = analyze_video_with_gemini(video['url'], selected_expert, google_api_key)
                                 if result:
                                     new_found = True
-                                    formatted_date = f"{video['date'][:4]}-{video['date'][4:6]}-{video['date'][6:]}" if video['date'] else datetime.datetime.now().strftime("%Y-%m-%d")
+                                    formatted_date = datetime.datetime.now().strftime("%Y-%m-%d")
                                     c.execute('''INSERT INTO analysis (date, expert_name, video_title, video_url, market_view, macro_view, buy_recom, sell_recom)
                                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
                                               (formatted_date, selected_expert, video['title'], video['url'], 
